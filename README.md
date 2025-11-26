@@ -17,7 +17,6 @@ bash <(curl -sL https://raw.githubusercontent.com/AiLi1337/install_caddy_emby/ma
 ## ✨ 核心功能 (V4 更新)
 
   * **⚡️ 极速配置**：自动识别系统 (Debian/Ubuntu/CentOS) 并安装最新版 Caddy。
-  * **🔄 循环菜单**：操作完不退出，方便进行多项设置（安装 -\> 检查端口 -\> 配置）。
   * **🛠 端口自动修复**：一键检测并强制清理占用 80/443 端口的 Nginx/Apache 进程，解决 Caddy 启动失败问题。
   * **🔒 完美 HTTPS 支持**：
       * 自动申请并续期 Let's Encrypt SSL 证书。
