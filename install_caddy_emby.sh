@@ -5,14 +5,12 @@
 #  Author: AiLi1337
 # ====================================================
 
-# 颜色定义
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 SKYBLUE='\033[0;36m'
 PLAIN='\033[0m'
 
-# 检查 root
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误：${PLAIN} 必须使用 root 用户运行！\n" && exit 1
 
 log()  { echo -e "${GREEN}[Info]${PLAIN} $1"; }
@@ -20,27 +18,36 @@ warn() { echo -e "${YELLOW}[Warning]${PLAIN} $1"; }
 error(){ echo -e "${RED}[Error]${PLAIN} $1"; }
 
 
-# 注册全局快捷命令 c（兼容管道/文件两种运行方式）
+# 注册全局快捷命令 c
 register_shortcut() {
     SHORTCUT="/usr/local/bin/c"
     SCRIPT_DEST="/usr/local/bin/caddy_emby.sh"
-    SCRIPT_PATH=$(realpath "$0" 2>/dev/null)
 
-    # 若 $0 是真实文件（非管道），则复制/更新到固定路径
-    if [ -f "$SCRIPT_PATH" ]; then
-        cp "$SCRIPT_PATH" "$SCRIPT_DEST"
+    # 优先用 BASH_SOURCE[0]，比 $0 更可靠
+    local SRC="${BASH_SOURCE[0]}"
+
+    # 判断 SRC 是否是真实存在的文件（排除管道/proc）
+    if [[ -f "$SRC" && "$SRC" != /proc/* ]]; then
+        cp "$SRC" "$SCRIPT_DEST"
+        chmod +x "$SCRIPT_DEST"
+    # 兜底：把脚本自身内容写到固定路径（适用于任何运行方式）
+    elif [[ ! -f "$SCRIPT_DEST" ]]; then
+        cat "$0" > "$SCRIPT_DEST" 2>/dev/null || \
+        { warn "无法自动保存脚本，请手动将脚本保存到 $SCRIPT_DEST"; return; }
         chmod +x "$SCRIPT_DEST"
     fi
 
-    # 创建快捷命令 c
-    if [ -f "$SCRIPT_DEST" ]; then
-        if [ ! -f "$SHORTCUT" ]; then
-            printf '#!/bin/bash\nbash "%s"\n' "$SCRIPT_DEST" > "$SHORTCUT"
-            chmod +x "$SHORTCUT"
-            log "已注册快捷命令：下次直接输入 c 即可启动本脚本"
-        fi
-    else
-        warn "检测到管道运行，请先将脚本保存为文件再执行，才能注册快捷键 c"
+    # 创建 /usr/local/bin/c 快捷命令
+    if [[ ! -f "$SHORTCUT" ]]; then
+        printf '#!/bin/bash\nbash "%s"\n' "$SCRIPT_DEST" > "$SHORTCUT"
+        chmod +x "$SHORTCUT"
+        log "已注册快捷命令：下次直接输入 c 即可启动本脚本"
+    fi
+
+    # 双保险：同时写 alias 到 /root/.bashrc
+    if ! grep -q "alias c=" /root/.bashrc 2>/dev/null; then
+        echo "alias c='bash $SCRIPT_DEST'" >> /root/.bashrc
+        log "已写入 alias，重新登录后也可用 c 唤出脚本"
     fi
 }
 
@@ -139,10 +146,8 @@ configure_caddy() {
     read -p "请输入后端地址 (如 https://remote.com:443 或 127.0.0.1:8096): " EMBY_ADDRESS < /dev/tty
     [[ -z "$EMBY_ADDRESS" ]] && EMBY_ADDRESS="127.0.0.1:8096"
 
-    # 备份
     cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%F_%H%M%S) 2>/dev/null
 
-    # 追加模式下去重
     if [[ "$MODE" == "append" ]]; then
         if grep -q "^$DOMAIN {" /etc/caddy/Caddyfile; then
             warn "域名 $DOMAIN 已存在！正在删除旧配置块，写入新配置..."
