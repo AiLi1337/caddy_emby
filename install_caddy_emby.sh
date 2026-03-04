@@ -236,7 +236,7 @@ show_menu() {
     echo -e "##########################################################"
     echo -e " ${GREEN}1.${PLAIN} 安装环境 & Caddy"
     echo -e " ${GREEN}2.${PLAIN} 添加/覆盖 反代配置 (支持多站)"
-    echo -e " ${GREEN}3.${PLAIN} 删除指定站点配置 ${YELLOW}(NEW!)${PLAIN}"
+    echo -e " ${GREEN}3.${PLAIN} 删除指定站点配置"
     echo -e " ${GREEN}4.${PLAIN} 查看 Caddy 配置文件"
     echo -e "-------------------------------------------------"
     echo -e " ${GREEN}5.${PLAIN} 停止 Caddy"
