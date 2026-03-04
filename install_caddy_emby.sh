@@ -15,33 +15,46 @@ PLAIN='\033[0m'
 # 检查 root
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误：${PLAIN} 必须使用 root 用户运行！\n" && exit 1
 
-log() { echo -e "${GREEN}[Info]${PLAIN} $1"; }
+log()  { echo -e "${GREEN}[Info]${PLAIN} $1"; }
 warn() { echo -e "${YELLOW}[Warning]${PLAIN} $1"; }
-error() { echo -e "${RED}[Error]${PLAIN} $1"; }
+error(){ echo -e "${RED}[Error]${PLAIN} $1"; }
 
 
-# 注册全局快捷命令 c
+# 注册全局快捷命令 c（兼容管道/文件两种运行方式）
 register_shortcut() {
-    SCRIPT_PATH=$(realpath "$0")
     SHORTCUT="/usr/local/bin/c"
-    if [ ! -f "$SHORTCUT" ]; then
-        echo "#!/bin/bash" > "$SHORTCUT"
-        echo "bash \"$SCRIPT_PATH\"" >> "$SHORTCUT"
-        chmod +x "$SHORTCUT"
-        log "已注册快捷命令：下次直接输入 c 即可启动本脚本"
+    SCRIPT_DEST="/usr/local/bin/caddy_emby.sh"
+    SCRIPT_PATH=$(realpath "$0" 2>/dev/null)
+
+    # 若 $0 是真实文件（非管道），则复制/更新到固定路径
+    if [ -f "$SCRIPT_PATH" ]; then
+        cp "$SCRIPT_PATH" "$SCRIPT_DEST"
+        chmod +x "$SCRIPT_DEST"
+    fi
+
+    # 创建快捷命令 c
+    if [ -f "$SCRIPT_DEST" ]; then
+        if [ ! -f "$SHORTCUT" ]; then
+            printf '#!/bin/bash\nbash "%s"\n' "$SCRIPT_DEST" > "$SHORTCUT"
+            chmod +x "$SHORTCUT"
+            log "已注册快捷命令：下次直接输入 c 即可启动本脚本"
+        fi
+    else
+        warn "检测到管道运行，请先将脚本保存为文件再执行，才能注册快捷键 c"
     fi
 }
+
 
 # 1. 安装基础环境
 install_base() {
     log "正在检查并安装基础组件..."
-    # 增加 grep, sed, awk 确保文本处理正常
     if [ -f /etc/debian_version ]; then
         apt update -y && apt install -y curl wget sudo socat net-tools psmisc sed grep
     elif [ -f /etc/redhat-release ]; then
         yum install -y curl wget sudo socat net-tools psmisc sed grep
     fi
 }
+
 
 # 2. 端口占用查询
 check_port() {
@@ -57,6 +70,7 @@ check_port() {
     echo -e "如果显示 nginx/apache，请使用菜单 [8] 清理。"
     echo -e "如果显示 caddy，属正常现象。"
 }
+
 
 # 3. 强制清理端口
 kill_port() {
@@ -78,6 +92,7 @@ kill_port() {
     log "清理完成！"
     sleep 1
 }
+
 
 # 4. 安装 Caddy
 install_caddy() {
@@ -102,22 +117,20 @@ install_caddy() {
     fi
 }
 
-# 5. 配置向导 (核心升级：支持追加)
+
+# 5. 配置向导（支持追加）
 configure_caddy() {
     echo -e "------------------------------------------------"
     echo -e "${SKYBLUE}Caddy 反代配置 (支持多站点)${PLAIN}"
     echo -e "------------------------------------------------"
 
-    # 检查是否存在旧配置
     MODE="new"
     if [ -f /etc/caddy/Caddyfile ] && [ -s /etc/caddy/Caddyfile ]; then
         echo -e "检测到已有配置文件。"
         echo -e " ${GREEN}1.${PLAIN} 覆盖 (清空旧配置，仅保留这一个)"
         echo -e " ${GREEN}2.${PLAIN} 追加 (保留旧配置，添加新域名)"
         read -p "请选择模式 [1-2]: " config_mode < /dev/tty
-        if [[ "$config_mode" == "2" ]]; then
-            MODE="append"
-        fi
+        [[ "$config_mode" == "2" ]] && MODE="append"
     fi
 
     read -p "请输入新域名 (例如 emby2.my.com): " DOMAIN < /dev/tty
@@ -129,18 +142,15 @@ configure_caddy() {
     # 备份
     cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%F_%H%M%S) 2>/dev/null
 
-    # 如果是追加模式，先检查域名是否已存在，防止重复报错
+    # 追加模式下去重
     if [[ "$MODE" == "append" ]]; then
-        if grep -q "$DOMAIN {" /etc/caddy/Caddyfile; then
+        if grep -q "^$DOMAIN {" /etc/caddy/Caddyfile; then
             warn "域名 $DOMAIN 已存在！正在删除旧配置块，写入新配置..."
-            # 使用 sed 删除该域名对应的块 (假设格式标准：域名 { ... })
             sed -i "/^$DOMAIN {/,/^}/d" /etc/caddy/Caddyfile
-            # 删除多余空行
             sed -i '/^\s*$/d' /etc/caddy/Caddyfile
         fi
     fi
 
-    # 生成配置块内容
     CONFIG_BLOCK="$DOMAIN {
     encode gzip
     header Access-Control-Allow-Origin *
@@ -154,11 +164,9 @@ configure_caddy() {
 }"
 
     log "正在写入配置..."
-
     if [[ "$MODE" == "new" ]]; then
         echo "$CONFIG_BLOCK" > /etc/caddy/Caddyfile
     else
-        # 确保追加前有个空行，美观
         echo "" >> /etc/caddy/Caddyfile
         echo "$CONFIG_BLOCK" >> /etc/caddy/Caddyfile
     fi
@@ -166,7 +174,8 @@ configure_caddy() {
     restart_caddy
 }
 
-# 6. 删除指定配置 (新功能)
+
+# 6. 删除指定配置
 delete_config() {
     echo -e "------------------------------------------------"
     echo -e "${SKYBLUE}删除指定站点配置${PLAIN}"
@@ -177,9 +186,7 @@ delete_config() {
         return
     fi
 
-    # 列出当前配置的域名
     echo -e "当前已配置的域名："
-    # 提取以 { 结尾的行首域名
     grep -E "^[a-zA-Z0-9.-]+ \{" /etc/caddy/Caddyfile | awk '{print $1}' > /tmp/caddy_domains.txt
 
     if [ ! -s /tmp/caddy_domains.txt ]; then
@@ -195,24 +202,19 @@ delete_config() {
 
     echo -e "------------------------------------------------"
     read -p "请输入要删除的域名 (完整复制上面的域名): " DEL_DOMAIN < /dev/tty
-
     if [[ -z "$DEL_DOMAIN" ]]; then return; fi
 
-    # 再次确认
     if grep -q "^$DEL_DOMAIN {" /etc/caddy/Caddyfile; then
-        # 备份
         cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.del
-        # 删除操作
         sed -i "/^$DEL_DOMAIN {/,/^}/d" /etc/caddy/Caddyfile
-        # 清理空行
         sed -i '/^\s*$/d' /etc/caddy/Caddyfile
-
         log "域名 $DEL_DOMAIN 配置已删除。"
         restart_caddy
     else
         error "未找到域名 $DEL_DOMAIN 的配置！请检查拼写。"
     fi
 }
+
 
 restart_caddy() {
     log "正在重启 Caddy..."
@@ -228,7 +230,8 @@ restart_caddy() {
     fi
 }
 
-# 7. 菜单循环
+
+# 主菜单
 show_menu() {
     clear
     echo -e "##########################################################"
@@ -236,7 +239,7 @@ show_menu() {
     echo -e "##########################################################"
     echo -e " ${GREEN}1.${PLAIN} 安装环境 & Caddy"
     echo -e " ${GREEN}2.${PLAIN} 添加/覆盖 反代配置 (支持多站)"
-    echo -e " ${GREEN}3.${PLAIN} 删除指定站点配置"
+    echo -e " ${GREEN}3.${PLAIN} 删除指定站点配置 ${YELLOW}(NEW!)${PLAIN}"
     echo -e " ${GREEN}4.${PLAIN} 查看 Caddy 配置文件"
     echo -e "-------------------------------------------------"
     echo -e " ${GREEN}5.${PLAIN} 停止 Caddy"
@@ -264,10 +267,10 @@ show_menu() {
     esac
 }
 
-# 注册快捷命令
+
+# ===== 入口 =====
 register_shortcut
 
-# 主循环
 while true; do
     show_menu
     echo -e "\n${GREEN}按回车键返回主菜单...${PLAIN}"
