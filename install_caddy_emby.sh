@@ -19,6 +19,19 @@ log() { echo -e "${GREEN}[Info]${PLAIN} $1"; }
 warn() { echo -e "${YELLOW}[Warning]${PLAIN} $1"; }
 error() { echo -e "${RED}[Error]${PLAIN} $1"; }
 
+
+# 注册全局快捷命令 c
+register_shortcut() {
+    SCRIPT_PATH=$(realpath "$0")
+    SHORTCUT="/usr/local/bin/c"
+    if [ ! -f "$SHORTCUT" ]; then
+        echo "#!/bin/bash" > "$SHORTCUT"
+        echo "bash \"$SCRIPT_PATH\"" >> "$SHORTCUT"
+        chmod +x "$SHORTCUT"
+        log "已注册快捷命令：下次直接输入 c 即可启动本脚本"
+    fi
+}
+
 # 1. 安装基础环境
 install_base() {
     log "正在检查并安装基础组件..."
@@ -53,7 +66,7 @@ kill_port() {
     systemctl stop apache2 2>/dev/null
     systemctl disable apache2 2>/dev/null
     systemctl stop httpd 2>/dev/null
-    
+
     if command -v fuser &> /dev/null; then
         fuser -k 80/tcp 2>/dev/null
         fuser -k 443/tcp 2>/dev/null
@@ -168,7 +181,7 @@ delete_config() {
     echo -e "当前已配置的域名："
     # 提取以 { 结尾的行首域名
     grep -E "^[a-zA-Z0-9.-]+ \{" /etc/caddy/Caddyfile | awk '{print $1}' > /tmp/caddy_domains.txt
-    
+
     if [ ! -s /tmp/caddy_domains.txt ]; then
         warn "配置文件中未找到有效域名块。"
         return
@@ -193,7 +206,7 @@ delete_config() {
         sed -i "/^$DEL_DOMAIN {/,/^}/d" /etc/caddy/Caddyfile
         # 清理空行
         sed -i '/^\s*$/d' /etc/caddy/Caddyfile
-        
+
         log "域名 $DEL_DOMAIN 配置已删除。"
         restart_caddy
     else
@@ -218,9 +231,9 @@ restart_caddy() {
 # 7. 菜单循环
 show_menu() {
     clear
-    echo -e "#################################################"
-    echo -e "#    Caddy + Emby 多站点管理脚本 (V5 Pro)       #"
-    echo -e "#################################################"
+    echo -e "##########################################################"
+    echo -e "#    Caddy + Emby 多站点管理脚本 (V5 Pro) (快捷键c唤出)  #"
+    echo -e "##########################################################"
     echo -e " ${GREEN}1.${PLAIN} 安装环境 & Caddy"
     echo -e " ${GREEN}2.${PLAIN} 添加/覆盖 反代配置 (支持多站)"
     echo -e " ${GREEN}3.${PLAIN} 删除指定站点配置 ${YELLOW}(NEW!)${PLAIN}"
@@ -250,6 +263,9 @@ show_menu() {
         *) error "请输入正确的数字" ;;
     esac
 }
+
+# 注册快捷命令
+register_shortcut
 
 # 主循环
 while true; do
