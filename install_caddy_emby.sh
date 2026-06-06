@@ -61,12 +61,80 @@ register_shortcut() {
 
 # 1. 安装基础环境
 install_base() {
-    log "正在检查并安装基础组件..."
+    log "正在检查基础组件..."
+    
+    local packages=("curl" "wget" "sudo" "socat" "net-tools" "psmisc" "sed" "grep")
+    local to_install=()
+    
     if [ -f /etc/debian_version ]; then
-        apt update -y && apt install -y curl wget sudo socat net-tools psmisc sed grep
+        for pkg in "${packages[@]}"; do
+            if ! dpkg -s "$pkg" 2>/dev/null | grep -q "^Status: install ok installed"; then
+                to_install+=("$pkg")
+            else
+                log "$pkg 已安装，跳过"
+            fi
+        done
+        if [ ${#to_install[@]} -gt 0 ]; then
+            log "正在安装缺失的包: ${to_install[*]}"
+            apt update -y && apt install -y "${to_install[@]}"
+        else
+            log "所有基础组件已安装"
+        fi
     elif [ -f /etc/redhat-release ]; then
-        yum install -y curl wget sudo socat net-tools psmisc sed grep
+        for pkg in "${packages[@]}"; do
+            if ! rpm -q "$pkg" &>/dev/null; then
+                to_install+=("$pkg")
+            else
+                log "$pkg 已安装，跳过"
+            fi
+        done
+        if [ ${#to_install[@]} -gt 0 ]; then
+            log "正在安装缺失的包: ${to_install[*]}"
+            yum install -y "${to_install[@]}"
+        else
+            log "所有基础组件已安装"
+        fi
+    else
+        warn "未检测到支持的 Linux 发行版 (Debian/Ubuntu/CentOS/RHEL)"
+        log "请手动安装依赖: curl wget sudo socat net-tools psmisc sed grep"
     fi
+}
+
+
+# 验证域名格式
+validate_domain() {
+    local domain="$1"
+    if [[ ! "$domain" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; then
+        return 1
+    fi
+    return 0
+}
+
+
+# 验证后端地址格式
+validate_backend() {
+    local backend="$1"
+    if [[ "$backend" =~ ^https?://[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
+        return 0
+    fi
+    if [[ "$backend" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}:[0-9]+$ ]]; then
+        local ip="${backend%:*}"
+        local valid=true
+        IFS='.' read -ra OCTETS <<< "$ip"
+        for octet in "${OCTETS[@]}"; do
+            if [ "$octet" -gt 255 ] 2>/dev/null; then
+                valid=false
+                break
+            fi
+        done
+        if $valid; then
+            return 0
+        fi
+    fi
+    if [[ "$backend" =~ ^[a-zA-Z0-9.-]+:[0-9]+$ ]]; then
+        return 0
+    fi
+    return 1
 }
 
 
@@ -126,8 +194,14 @@ install_caddy() {
             yum copr enable @caddyserver/caddy -y
             yum install caddy -y
         fi
-        systemctl enable caddy
-        log "Caddy 安装完成！"
+        
+        if command -v caddy &> /dev/null; then
+            systemctl enable caddy
+            log "Caddy 安装完成！"
+        else
+            error "Caddy 安装失败，请检查网络或手动安装"
+            return 1
+        fi
     fi
 }
 
@@ -144,16 +218,39 @@ configure_caddy() {
         echo -e " ${GREEN}1.${PLAIN} 覆盖 (清空旧配置，仅保留这一个)"
         echo -e " ${GREEN}2.${PLAIN} 追加 (保留旧配置，添加新域名)"
         read -p "请选择模式 [1-2]: " config_mode < /dev/tty
-        [[ "$config_mode" == "2" ]] && MODE="append"
+        if [[ "$config_mode" == "2" ]]; then
+            MODE="append"
+        elif [[ "$config_mode" != "1" ]]; then
+            warn "无效选择，将使用覆盖模式"
+            MODE="new"
+        fi
     fi
 
     read -p "请输入新域名 (例如 emby2.my.com): " DOMAIN < /dev/tty
     if [[ -z "$DOMAIN" ]]; then error "域名不能为空"; return; fi
+    if ! validate_domain "$DOMAIN"; then
+        error "域名格式无效，请输入正确的域名（如 emby.my.com）"
+        return
+    fi
 
     read -p "请输入后端地址 (如 https://remote.com:443 或 127.0.0.1:8096): " EMBY_ADDRESS < /dev/tty
     [[ -z "$EMBY_ADDRESS" ]] && EMBY_ADDRESS="127.0.0.1:8096"
+    if ! validate_backend "$EMBY_ADDRESS"; then
+        error "后端地址格式无效，请输入正确的地址（如 127.0.0.1:8096 或 https://remote.com:443）"
+        return
+    fi
 
+    if [ ! -d /etc/caddy ]; then
+        mkdir -p /etc/caddy
+    fi
+    
     cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%F_%H%M%S) 2>/dev/null
+
+    backup_count=$(ls -1 /etc/caddy/Caddyfile.bak.* 2>/dev/null | wc -l)
+    if [ "$backup_count" -gt 5 ]; then
+        ls -1t /etc/caddy/Caddyfile.bak.* | tail -n +6 | xargs rm -f 2>/dev/null
+        log "已清理旧备份文件"
+    fi
 
     if [[ "$MODE" == "append" ]]; then
         if grep -q "^$DOMAIN {" /etc/caddy/Caddyfile; then
@@ -207,21 +304,56 @@ delete_config() {
     fi
 
     i=1
+    domains=()
     while read line; do
         echo -e " ${GREEN}$i.${PLAIN} $line"
+        domains+=("$line")
         ((i++))
     done < /tmp/caddy_domains.txt
 
     echo -e "------------------------------------------------"
-    read -p "请输入要删除的域名 (完整复制上面的域名): " DEL_DOMAIN < /dev/tty
+    echo -e "请输入要删除的域名编号或完整域名:"
+    read -p "请输入数字或域名: " DEL_DOMAIN < /dev/tty
+    
     if [[ -z "$DEL_DOMAIN" ]]; then return; fi
+    
+    if [[ "$DEL_DOMAIN" =~ ^[0-9]+$ ]]; then
+        idx=$((DEL_DOMAIN - 1))
+        if [[ $idx -ge 0 && $idx -lt ${#domains[@]} ]]; then
+            DEL_DOMAIN="${domains[$idx]}"
+        else
+            error "无效的编号"
+            return
+        fi
+    fi
+
+    echo -e ""
+    read -p "确定要删除域名 $DEL_DOMAIN 吗? (y/n): " confirm < /dev/tty
+    if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
+        log "已取消删除操作"
+        return
+    fi
 
     if grep -q "^$DEL_DOMAIN {" /etc/caddy/Caddyfile; then
         cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.del
         sed -i "/^$DEL_DOMAIN {/,/^}/d" /etc/caddy/Caddyfile
         sed -i '/^\s*$/d' /etc/caddy/Caddyfile
         log "域名 $DEL_DOMAIN 配置已删除。"
-        restart_caddy
+        
+        if grep -qE "^[a-zA-Z0-9.-]+ \{" /etc/caddy/Caddyfile; then
+            restart_caddy
+        else
+            warn "已删除最后一个域名配置，Caddyfile 已清空。"
+            log "正在停止 Caddy 服务..."
+            systemctl stop caddy
+            if ! systemctl is-active --quiet caddy; then
+                echo -e "\n${GREEN}=========================================="
+                echo -e " 操作成功！Caddy 服务已停止。"
+                echo -e "==========================================${PLAIN}"
+            else
+                error "停止 Caddy 服务失败！"
+            fi
+        fi
     else
         error "未找到域名 $DEL_DOMAIN 的配置！请检查拼写。"
     fi
@@ -229,6 +361,17 @@ delete_config() {
 
 
 restart_caddy() {
+    if [ ! -f /etc/caddy/Caddyfile ]; then
+        error "Caddyfile 配置文件不存在！"
+        return
+    fi
+    
+    if [ ! -s /etc/caddy/Caddyfile ]; then
+        warn "Caddyfile 配置文件为空，无法启动 Caddy。"
+        log "请先添加域名配置（选项 2）"
+        return
+    fi
+    
     log "正在重启 Caddy..."
     systemctl restart caddy
     sleep 2
@@ -263,17 +406,34 @@ show_menu() {
     echo -e " ${GREEN}0.${PLAIN} 退出脚本"
     echo -e ""
     read -p " 请输入数字 [0-9]: " num < /dev/tty
+    
+    if [[ ! "$num" =~ ^[0-9]$ ]]; then
+        error "请输入有效的数字 (0-9)"
+        echo -e "\n${GREEN}按回车键返回主菜单...${PLAIN}"
+        read temp < /dev/tty
+        return
+    fi
 
     case "$num" in
         1) install_base; install_caddy ;;
         2) install_base; configure_caddy ;;
         3) delete_config ;;
         4) cat /etc/caddy/Caddyfile ;;
-        5) systemctl stop caddy; log "服务已停止" ;;
+        5) if systemctl is-active --quiet caddy; then
+            systemctl stop caddy
+            log "服务已停止"
+        else
+            warn "Caddy 服务未运行"
+        fi ;;
         6) restart_caddy ;;
         7) install_base; check_port ;;
         8) install_base; kill_port ;;
-        9) apt remove caddy -y 2>/dev/null; yum remove caddy -y 2>/dev/null; rm -rf /etc/caddy; log "已卸载" ;;
+        9) if systemctl is-active --quiet caddy; then
+            systemctl stop caddy
+           fi
+           apt remove caddy -y 2>/dev/null; yum remove caddy -y 2>/dev/null
+           rm -rf /etc/caddy
+           log "已卸载" ;;
         0) exit 0 ;;
         *) error "请输入正确的数字" ;;
     esac
